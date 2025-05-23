@@ -4,4 +4,11 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "trl>=0.17.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "unsloth==2025.5.7",
+]
