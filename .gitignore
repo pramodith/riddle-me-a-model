@@ -10,3 +10,4 @@ wheels/
 .venv
 .env
 logs
+unsloth_compiled_cache/

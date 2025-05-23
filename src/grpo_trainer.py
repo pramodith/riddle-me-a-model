@@ -1,6 +1,6 @@
 import click
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig, GRPOTrainer
-from unsloth import FastLanguageModel, is_bfloat16_supported
 import torch
 from tqdm import tqdm
 from datasets import Dataset
@@ -19,41 +19,47 @@ class RiddleTrainer():
         base_model_name: str = "Qwen/Qwen2.5-7B-Instruct", 
         max_seq_length: int = 512,
         lora_rank: int = 64,
-        gpu_memory_utilization: float = 0.8,
+        gpu_memory_utilization: float = 0.5,
         is_lora: bool = True,
+        bottom_k_layers_to_freeze: int = 0,
+        num_train_steps: int = 500,
         ):
         self.base_model_name = base_model_name
         self.max_seq_length = max_seq_length
         self.lora_rank = lora_rank
         self.gpu_memory_utilization = gpu_memory_utilization
-        self.model, self.tokenizer = self.get_unsloth_model(is_lora)
+        self.num_train_steps = num_train_steps
+        self.model, self.tokenizer = self.get_unsloth_model(is_lora, bottom_k_layers_to_freeze)
     
-    def get_unsloth_model(self, is_lora: bool = True):
+    def get_unsloth_model(self, is_lora: bool = True, bottom_k_layers_to_freeze: int = 0):
         max_seq_length = self.max_seq_length # Can increase for longer think traces
         lora_rank = self.lora_rank # Larger rank = smarter, but slower
-
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name = self.base_model_name,
-            max_seq_length = max_seq_length,
-            load_in_4bit = True, # False for LoRA 16bit
-            fast_inference = True, # Enable vLLM fast inference
-            max_lora_rank = lora_rank,
-            gpu_memory_utilization = self.gpu_memory_utilization, # Reduce if out of memory
-        )
-        if is_lora:
-            model = FastLanguageModel.get_peft_model(
-                model,
-                r = lora_rank, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
-                target_modules = [
-                    "q_proj", "k_proj", "v_proj", "o_proj",
-                    "gate_proj", "up_proj", "down_proj",
-                ], # Remove QKVO if out of memory
-                layers_pattern=r"model.layers\.\d+\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
-                layers_to_transform = list(range(28, 36)),
-                lora_alpha = lora_rank,
-                use_gradient_checkpointing = "unsloth", # Enable long context finetuning
-                random_state = 3407,
-            )
+        model = AutoModelForCausalLM.from_pretrained(self.base_model_name)
+        tokenizer = AutoTokenizer.from_pretrained(self.base_model_name)
+        # model, tokenizer = FastLanguageModel.from_pretrained(
+        #     model_name = self.base_model_name,
+        #     max_seq_length = max_seq_length,
+        #     load_in_4bit = True, # False for LoRA 16bit
+        #     fast_inference = True, # Enable vLLM fast inference
+        #     max_lora_rank = lora_rank,
+        #     gpu_memory_utilization = self.gpu_memory_utilization, # Reduce if out of memory
+        # )
+        # if is_lora:
+        #     model = FastLanguageModel.get_peft_model(
+        #         model,
+        #         r = lora_rank, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+        #         target_modules = [
+        #             "q_proj", "k_proj", "v_proj", "o_proj",
+        #             "gate_proj", "up_proj", "down_proj",
+        #         ], # Remove QKVO if out of memory
+        #         layers_pattern=r"model.layers\.\d+\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$",
+        #         layers_to_transform = list(range(self.bottom_k_layers_to_freeze, len(model.model.layers))),
+        #         lora_alpha = lora_rank,
+        #         use_gradient_checkpointing = "unsloth", # Enable long context finetuning
+        #         random_state = 3407,
+        #     )
+        # else:
+        model = self.freeze_layers(model)
         return model, tokenizer
 
     def freeze_layers(self, model, bottom_k_layers_to_freeze=0):
@@ -75,21 +81,21 @@ class RiddleTrainer():
             # per_device_eval_batch_size=8,
             warmup_ratio = 0.1,
             lr_scheduler_type = "cosine",
-            optim = "adamw_8bit",
+            optim = "adamw_torch_fused",
             logging_steps = 1,
-            bf16 = is_bfloat16_supported(),
-            fp16 = not is_bfloat16_supported(),
-            per_device_train_batch_size = 1,
+            bf16 = True,
+            fp16 = False,
+            per_device_train_batch_size = 4,
             gradient_accumulation_steps = 1, # Increase to 4 for smoother training
-            num_generations = 8, # Decrease if out of memory
+            num_generations = 4, # Decrease if out of memory
             max_prompt_length = 256,
-            max_completion_length = 512,
+            max_completion_length = 300,
             # num_train_epochs = 1, # Set to 1 for a full training run
-            max_steps = 500,
+            max_steps = self.num_train_steps,
             # eval_steps = 5,
             save_steps = 10,
             max_grad_norm = 0.1,
-            report_to = "tensorboard", # Can use Weights & Biases
+            report_to = "none", # Can use Weights & Biases
             output_dir = "outputs",
         )
 
@@ -128,7 +134,7 @@ class RiddleTrainer():
                 )
                 outputs = self.model.generate(
                     inputs.to("cuda:0"),
-                    max_new_tokens=512,
+                    max_new_tokens=300,
                     do_sample=True,
                     temperature=0.7,
                     pad_token_id=self.tokenizer.eos_token_id
@@ -160,20 +166,30 @@ class RiddleTrainer():
             'format_rewards':  format_rewards/len(test_dataset)
         }
 
-    def push_trained_model(self, hf_repo_name: str):
-        self.model.model.push_to_hub_merged(
-            hf_repo_name,
-            self.tokenizer, 
-            save_method = "merged_16bit", 
-            token = True
-        )
+    def push_trained_model(self, hf_repo_name: str, is_lora: bool = True):
+        if is_lora:
+            self.model.model.push_to_hub_merged(
+                hf_repo_name,
+                self.tokenizer, 
+                save_method = "merged_16bit", 
+                token = True
+            )
+        else:
+            self.model.push_to_hub(
+                hf_repo_name,
+                self.tokenizer,
+                token = True
+            )
+
 
 @click.command()
-@click.option('--base-model-name', default="Qwen/Qwen2.5-7B-Instruct", help='Base model name for training')
+@click.option('--base-model-name', default="Qwen/Qwen2.5-1.5B-Instruct", help='Base model name for training')
 @click.option('--max-seq-length', default=512, type=int, help='Maximum sequence length')
 @click.option('--lora-rank', default=64, type=int, help='LoRA rank')
-@click.option('--gpu-memory-utilization', default=0.8, type=float, help='GPU memory utilization fraction')
-@click.option('--is-lora/--no-lora', default=True, help='Whether to use LoRA')
+@click.option('--gpu-memory-utilization', default=0.15, type=float, help='GPU memory utilization fraction')
+@click.option('--is-lora/--no-lora', default=False, help='Whether to use LoRA')
+@click.option('--bottom-k-layers-to-freeze', default=20, type=int, help='Number of bottom layers to freeze')
+@click.option('--num-train-steps', default=50, type=int, help='The number of steps to train the model for.')
 @click.option('--hf-repo-name', default="Pramodith/riddle_qwen2.5-3B", help='Hugging Face repository name for the trained model')
 def main(
     base_model_name, 
@@ -181,6 +197,8 @@ def main(
     lora_rank, 
     gpu_memory_utilization, 
     is_lora, 
+    bottom_k_layers_to_freeze,
+    num_train_steps,
     hf_repo_name
 ):
     trainer = RiddleTrainer(
@@ -188,7 +206,9 @@ def main(
         max_seq_length=max_seq_length,
         lora_rank=lora_rank,
         gpu_memory_utilization=gpu_memory_utilization,
-        is_lora=is_lora
+        is_lora=is_lora,
+        bottom_k_layers_to_freeze=bottom_k_layers_to_freeze,
+        num_train_steps=num_train_steps,
     )
     dataset = get_dataset()
     train_dataset, dev_dataset, test_dataset = get_dataset_splits(dataset)
