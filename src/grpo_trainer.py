@@ -97,6 +97,7 @@ class RiddleTrainer():
             max_grad_norm = 0.1,
             report_to = "none", # Can use Weights & Biases
             output_dir = "outputs",
+            vllm_gpu_memory_utilization=self.gpu_memory_utilization,
         )
 
         trainer = GRPOTrainer(
@@ -186,7 +187,7 @@ class RiddleTrainer():
 @click.option('--base-model-name', default="Qwen/Qwen2.5-1.5B-Instruct", help='Base model name for training')
 @click.option('--max-seq-length', default=512, type=int, help='Maximum sequence length')
 @click.option('--lora-rank', default=64, type=int, help='LoRA rank')
-@click.option('--gpu-memory-utilization', default=0.15, type=float, help='GPU memory utilization fraction')
+@click.option('--gpu-memory-utilization', default=0.5, type=float, help='GPU memory utilization fraction')
 @click.option('--is-lora/--no-lora', default=False, help='Whether to use LoRA')
 @click.option('--bottom-k-layers-to-freeze', default=20, type=int, help='Number of bottom layers to freeze')
 @click.option('--num-train-steps', default=50, type=int, help='The number of steps to train the model for.')
