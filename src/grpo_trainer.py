@@ -1,5 +1,9 @@
+import click
 from trl import GRPOConfig, GRPOTrainer
 from unsloth import FastLanguageModel, is_bfloat16_supported
+import torch
+from tqdm import tqdm
+from datasets import Dataset
 
 from reward_functions import (
     correctness_reward_func,
@@ -131,7 +135,7 @@ class RiddleTrainer():
                 )
                 
                 # Decode responses
-                response = tokenizer.decode(outputs[0][len(inputs[0]): ], skip_special_tokens=True)
+                response = self.tokenizer.decode(outputs[0][len(inputs[0]): ], skip_special_tokens=True)
                 
                 # Calculate rewards
                 accuracy_rewards = 0
@@ -156,10 +160,41 @@ class RiddleTrainer():
             'format_rewards':  format_rewards/len(test_dataset)
         }
 
+    def push_trained_model(self, hf_repo_name: str):
+        self.model.model.push_to_hub_merged(
+            hf_repo_name,
+            self.tokenizer, 
+            save_method = "merged_16bit", 
+            token = True
+        )
 
-if __name__ == "__main__":
-    trainer = RiddleTrainer()
+@click.command()
+@click.option('--base-model-name', default="Qwen/Qwen2.5-7B-Instruct", help='Base model name for training')
+@click.option('--max-seq-length', default=512, type=int, help='Maximum sequence length')
+@click.option('--lora-rank', default=64, type=int, help='LoRA rank')
+@click.option('--gpu-memory-utilization', default=0.8, type=float, help='GPU memory utilization fraction')
+@click.option('--is-lora/--no-lora', default=True, help='Whether to use LoRA')
+@click.option('--hf-repo-name', default="Pramodith/riddle_qwen2.5-3B", help='Hugging Face repository name for the trained model')
+def main(
+    base_model_name, 
+    max_seq_length, 
+    lora_rank, 
+    gpu_memory_utilization, 
+    is_lora, 
+    hf_repo_name
+):
+    trainer = RiddleTrainer(
+        base_model_name=base_model_name,
+        max_seq_length=max_seq_length,
+        lora_rank=lora_rank,
+        gpu_memory_utilization=gpu_memory_utilization,
+        is_lora=is_lora
+    )
     dataset = get_dataset()
     train_dataset, dev_dataset, test_dataset = get_dataset_splits(dataset)
     trainer.train_model(train_dataset, dev_dataset)
     trainer.evaluate_on_test_set(test_dataset)
+    trainer.push_trained_model(hf_repo_name)
+
+if __name__ == "__main__":
+    main()
